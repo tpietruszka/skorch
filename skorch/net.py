@@ -698,7 +698,7 @@ class NeuralNet(object):
             yp = self.evaluation_step(Xi, training=training)
             yield yp
 
-    def forward(self, X, training=False):
+    def forward(self, X, training=False, location='cpu'):
         """Gather and concatenate the output from forward call with
         input data.
 
@@ -724,13 +724,18 @@ class NeuralNet(object):
         training : bool (default=False)
           Whether to set the module to train mode or not.
 
+        location : str (default='cpu')
+          The storage location of the resulting tensor. The semantic
+          of this value is the same as for `torch.save`.
+
         Returns
         -------
         y_infer : torch tensor
           The result from the forward step.
 
         """
-        y_infer = list(self.forward_iter(X, training=training))
+        y_infer = [torch.serialization.default_restore_location(t, location)
+                   for t in self.forward_iter(X, training=training)]
 
         is_multioutput = len(y_infer) > 0 and isinstance(y_infer[0], tuple)
         if is_multioutput:
