@@ -284,12 +284,9 @@ class TestEpochScoring:
             assert y is None
             return np.mean(X)
 
-        # pylint: disable=unused-argument
-        def mysplit(dataset, y):
+        def mysplit(X, y):
             # set y_valid to None
-            ds_train = dataset
-            ds_valid = type(dataset)(dataset.X, y=None)
-            return ds_train, ds_valid
+            return X, X, y, None
 
         X, y = data
         net = net_cls(

@@ -11,7 +11,6 @@ from sklearn.model_selection import check_cv
 import torch
 import torch.utils.data
 
-from skorch.helper import Subset  # import from pytorch once available
 from skorch.utils import flatten
 from skorch.utils import is_pandas_ndframe
 from skorch.utils import multi_indexing
@@ -143,7 +142,7 @@ class Dataset(torch.utils.data.Dataset):
 
 
 class CVSplit(object):
-    """Class that performs the internal train/valid split on a dataset.
+    """Class that performs the internal train/valid split.
 
     The ``cv`` argument here works similarly to the regular sklearn ``cv``
     parameter in, e.g., ``GridSearchCV``. However, instead of cycling
@@ -181,7 +180,7 @@ class CVSplit(object):
       information, look at the sklearn documentation of
       ``(Stratified)ShuffleSplit``.
 
-    """
+      """
     def __init__(
             self,
             cv=5,
@@ -233,9 +232,8 @@ class CVSplit(object):
     def _is_regular(self, x):
         return (x is None) or isinstance(x, np.ndarray) or is_pandas_ndframe(x)
 
-    def __call__(self, dataset, y=None, groups=None):
-        bad_y_error = ValueError(
-            "Stratified CV requires explicitely passing a suitable y.")
+    def __call__(self, X, y, groups=None):
+        bad_y_error = ValueError("Stratified CV not possible with given y.")
         if (y is None) and self.stratified:
             raise bad_y_error
 
@@ -244,21 +242,23 @@ class CVSplit(object):
             raise bad_y_error
 
         # pylint: disable=invalid-name
-        len_dataset = get_len(dataset)
+        len_X = get_len(X)
         if y is not None:
             len_y = get_len(y)
-            if len_dataset != len_y:
-                raise ValueError("Cannot perform a CV split if dataset and y "
+            if len_X != len_y:
+                raise ValueError("Cannot perform a CV split if X and y "
                                  "have different lengths.")
 
-        args = (np.arange(len_dataset),)
+        args = (np.arange(len_X),)
         if self._is_stratified(cv):
             args = args + (to_numpy(y),)
 
         idx_train, idx_valid = next(iter(cv.split(*args, groups=groups)))
-        dataset_train = Subset(dataset, idx_train)
-        dataset_valid = Subset(dataset, idx_valid)
-        return dataset_train, dataset_valid
+        X_train = multi_indexing(X, idx_train)
+        X_valid = multi_indexing(X, idx_valid)
+        y_train = None if y is None else multi_indexing(y, idx_train)
+        y_valid = None if y is None else multi_indexing(y, idx_valid)
+        return X_train, X_valid, y_train, y_valid
 
     def __repr__(self):
         # pylint: disable=useless-super-delegation

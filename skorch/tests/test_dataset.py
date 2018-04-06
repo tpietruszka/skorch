@@ -10,7 +10,6 @@ import torch.utils.data
 from torch import nn
 import torch.nn.functional as F
 
-from skorch.utils import data_from_dataset
 from skorch.utils import to_tensor
 from skorch.tests.conftest import pandas_installed
 
@@ -441,12 +440,8 @@ class TestTrainSplitIsUsed:
 
     @pytest.fixture
     def data_split(self, data):
-        from skorch.dataset import Dataset
-
         X, y = data
-        dataset_train = Dataset(X[:2], y[:2])
-        dataset_valid = Dataset(X[2:], y[2:])
-        return dataset_train, dataset_valid
+        return X[:2], X[2:], y[:2], y[2:]
 
     @pytest.fixture
     def module(self, classifier_module):
@@ -474,8 +469,6 @@ class TestTrainSplitIsUsed:
             iterator_valid=iterator,
             train_split=train_split
         )
-        net.initialize()
-        net.callbacks_ = []
 
         mock = Mock()
 
@@ -487,48 +480,29 @@ class TestTrainSplitIsUsed:
             return wrapper
 
         import types
-        net.get_iterator = types.MethodType(decorator(net.get_iterator), net)
-        return net.partial_fit(X, y), mock
+        net.train_step = types.MethodType(decorator(net.train_step), net)
+        net.validation_step = types.MethodType(
+            decorator(net.validation_step), net)
+        return net.fit(X, y), mock
 
     def test_steps_called_with_split_data(self, net_and_mock, data_split):
         mock = net_and_mock[1]
         assert mock.call_count == 2  # once for train, once for valid
-        assert mock.call_args_list[0][0][1] == data_split[0]
-        assert mock.call_args_list[0][1]['training'] is True
-        assert mock.call_args_list[1][0][1] == data_split[1]
-        assert mock.call_args_list[1][1]['training'] is False
+        assert (mock.call_args_list[0][0][1] == data_split[0]).all()
+        assert (mock.call_args_list[0][0][2] == data_split[2]).all()
+        assert (mock.call_args_list[1][0][1] == data_split[1]).all()
+        assert (mock.call_args_list[1][0][2] == data_split[3]).all()
 
 
 class TestCVSplit:
     num_samples = 100
 
-    @staticmethod
-    def assert_datasets_equal(ds0, ds1):
-        """Generic function to test equality of dataset values."""
-        assert len(ds0) == len(ds1)
-        for i in range(len(ds0)):
-            x0, y0 = ds0[i]
-            x1, y1 = ds1[i]
-            try:
-                assert x0 == x1
-            except (RuntimeError, ValueError):
-                assert (x0 == x1).all()
-            try:
-                assert y0 == y1
-            except (RuntimeError, ValueError):
-                assert (y0 == y1).all()
-
     @pytest.fixture
-    def dataset_cls(self):
-        from skorch.dataset import Dataset
-        return Dataset
-
-    @pytest.fixture
-    def data(self, dataset_cls):
+    def data(self):
         X = np.random.random((self.num_samples, 10))
         assert self.num_samples % 4 == 0
         y = np.repeat([0, 1, 2, 3], self.num_samples // 4)
-        return dataset_cls(X, y)
+        return X, y
 
     @pytest.fixture
     def cv_split_cls(self):
@@ -536,32 +510,31 @@ class TestCVSplit:
         return CVSplit
 
     def test_reproducible(self, cv_split_cls, data):
-        dataset_train0, dataset_valid0 = cv_split_cls(5)(data)
-        dataset_train1, dataset_valid1 = cv_split_cls(5)(data)
-        self.assert_datasets_equal(dataset_train0, dataset_train1)
-        self.assert_datasets_equal(dataset_valid0, dataset_valid1)
+        X, y = data
+        X_train1, X_valid1, y_train1, y_valid1 = cv_split_cls(5)(X, y)
+        X_train2, X_valid2, y_train2, y_valid2 = cv_split_cls(5)(X, y)
+        assert np.all(X_train1 == X_train2)
+        assert np.all(X_valid1 == X_valid2)
+        assert np.all(y_train1 == y_train2)
+        assert np.all(y_valid1 == y_valid2)
 
     @pytest.mark.parametrize('cv', [2, 4, 5, 10])
     def test_different_kfolds(self, cv_split_cls, cv, data):
         if self.num_samples % cv != 0:
             raise ValueError("Num samples not divisible by {}".format(cv))
 
-        dataset_train, dataset_valid = cv_split_cls(cv)(data)
-        assert len(dataset_train) + len(dataset_valid) == self.num_samples
-        assert len(dataset_valid) == self.num_samples // cv
+        X, y = data
+        X_train, X_valid, y_train, y_valid = cv_split_cls(cv)(X, y)
+        assert len(X_train) + len(X_valid) == self.num_samples
+        assert len(y_train) + len(y_valid) == self.num_samples
+        assert len(X_valid) == len(y_valid) == self.num_samples // cv
 
-    @pytest.mark.parametrize('cv', [5, 0.2])
-    def test_stratified(self, cv_split_cls, data, cv):
+    def test_stratified(self, cv_split_cls, data):
+        X = data[0]
         num_expected = self.num_samples // 4
         y = np.hstack([np.repeat([0, 0, 0], num_expected),
                        np.repeat([1], num_expected)])
-        data.y = y
-
-        dataset_train, dataset_valid = cv_split_cls(
-            cv, stratified=True)(data, y)
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
-
+        _, _, y_train, y_valid = cv_split_cls(5, stratified=True)(X, y)
         assert y_train.sum() == 0.8 * num_expected
         assert y_valid.sum() == 0.2 * num_expected
 
@@ -571,9 +544,21 @@ class TestCVSplit:
             raise ValueError("Num samples cannot be evenly distributed for "
                              "fraction {}".format(cv))
 
-        dataset_train, dataset_valid = cv_split_cls(cv)(data)
-        assert len(dataset_train) + len(dataset_valid) == self.num_samples
-        assert len(dataset_valid) == self.num_samples * cv
+        X, y = data
+        X_train, X_valid, y_train, y_valid = cv_split_cls(cv)(X, y)
+        assert len(X_train) + len(X_valid) == self.num_samples
+        assert len(y_train) + len(y_valid) == self.num_samples
+        assert len(X_valid) == len(y_valid) == self.num_samples * cv
+
+    def test_stratified_fraction(self, cv_split_cls, data):
+        X = data[0]
+        frac = 0.2
+        num_expected = self.num_samples // 4
+        y = np.hstack([np.repeat([0, 0, 0], num_expected),
+                       np.repeat([1], num_expected)])
+        _, _, y_train, y_valid = cv_split_cls(frac, stratified=True)(X, y)
+        assert y_train.sum() == 0.8 * num_expected
+        assert y_valid.sum() == 0.2 * num_expected
 
     @pytest.mark.parametrize('cv', [0.1, 0.2, 0.5, 0.75])
     def test_fraction_no_y(self, cv_split_cls, data, cv):
@@ -581,25 +566,23 @@ class TestCVSplit:
             raise ValueError("Num samples cannot be evenly distributed for "
                              "fraction {}".format(cv))
 
+        X = data[0]
         m = int(cv * self.num_samples)
         n = int((1 - cv) * self.num_samples)
-        dataset_train, dataset_valid = cv_split_cls(
-            cv, stratified=False)(data, None)
-        assert len(dataset_valid) == m
-        assert len(dataset_train) == n
+        X_train, X_valid, _, _ = cv_split_cls(cv, stratified=False)(X, None)
+        assert len(X_valid) == m
+        assert len(X_train) == n
 
     def test_fraction_no_classifier(self, cv_split_cls, data):
-        y = np.random.random(self.num_samples)
-        data.y = y
-
+        X = data[0]
+        y = np.random.random(len(X))
         cv = 0.2
         m = int(cv * self.num_samples)
         n = int((1 - cv) * self.num_samples)
-        dataset_train, dataset_valid = cv_split_cls(
-            cv, stratified=False)(data, y)
-
-        assert len(dataset_valid) == m
-        assert len(dataset_train) == n
+        X_train, X_valid, y_train, y_valid = cv_split_cls(
+            cv, stratified=False)(X, y)
+        assert len(X_valid) == len(y_valid) == m
+        assert len(X_train) == len(y_train) == n
 
     @pytest.mark.parametrize('cv', [0, -0.001, -0.2, -3])
     def test_bad_values_raise(self, cv_split_cls, cv):
@@ -610,93 +593,76 @@ class TestCVSplit:
                     "but CVSplit got {}".format(cv))
         assert exc.value.args[0] == expected
 
-    @pytest.mark.parametrize('cv', [5, 0.2])
-    def test_not_stratified(self, cv_split_cls, data, cv):
+    def test_not_stratified(self, cv_split_cls, data):
+        X = data[0]
         num_expected = self.num_samples // 4
         y = np.hstack([np.repeat([0, 0, 0], num_expected),
                        np.repeat([1], num_expected)])
-        data.y = y
-
-        dataset_train, dataset_valid = cv_split_cls(
-            cv, stratified=False)(data, y)
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
-
-        # when not stratified, we cannot know the distribution of targets
-        assert y_train.sum() + y_valid.sum() == num_expected
+        _, _, y_train, y_valid = cv_split_cls(5, stratified=False)(X, y)
+        assert y_train.sum() == num_expected
+        assert y_valid.sum() == 0
 
     def test_predefined_split(self, cv_split_cls, data):
+        X, y = data
+
         from sklearn.model_selection import PredefinedSplit
-        indices = (data.y > 0).astype(int)
+        indices = (y > 0).astype(int)
         split = PredefinedSplit(indices)
 
-        dataset_train, dataset_valid = cv_split_cls(split)(data)
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
-
+        _, _, y_train, y_valid = cv_split_cls(split)(X, y)
         assert (y_train > 0).all()
         assert (y_valid == 0).all()
 
     def test_with_y_none(self, cv_split_cls, data):
-        data.y = None
+        X = data[0]
+        y = None
         m = self.num_samples // 5
         n = self.num_samples - m
-        dataset_train, dataset_valid = cv_split_cls(5)(data)
 
-        assert len(dataset_train) == n
-        assert len(dataset_valid) == m
-
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
-
+        X_train, X_valid, y_train, y_valid = cv_split_cls(5)(X, y)
+        assert len(X_train) == n
+        assert len(X_valid) == m
         assert y_train is None
         assert y_valid is None
 
     def test_with_torch_tensors(self, cv_split_cls, data):
-        data.X = to_tensor(data.X, use_cuda=False)
-        data.y = to_tensor(data.y, use_cuda=False)
+        X, y = data
+        X = to_tensor(X, use_cuda=False)
+        y = to_tensor(y, use_cuda=False)
         m = self.num_samples // 5
         n = self.num_samples - m
-        dataset_train, dataset_valid = cv_split_cls(5)(data)
 
-        assert len(dataset_valid) == m
-        assert len(dataset_train) == n
+        X_train, X_valid, y_train, y_valid = cv_split_cls(5)(X, y)
+        assert len(X_train) == len(y_train) == n
+        assert len(X_valid) == len(y_valid) == m
 
     def test_with_torch_tensors_and_stratified(self, cv_split_cls, data):
+        X = to_tensor(data[0], use_cuda=False)
         num_expected = self.num_samples // 4
-        data.X = to_tensor(data.X, use_cuda=False)
         y = np.hstack([np.repeat([0, 0, 0], num_expected),
                        np.repeat([1], num_expected)])
-        data.y = to_tensor(y, use_cuda=False)
-
-        dataset_train, dataset_valid = cv_split_cls(5, stratified=True)(data, y)
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
-
+        y = to_tensor(y, use_cuda=False)
+        _, _, y_train, y_valid = cv_split_cls(5, stratified=True)(X, y)
         assert y_train.sum() == 0.8 * num_expected
         assert y_valid.sum() == 0.2 * num_expected
 
     def test_with_list_of_arrays(self, cv_split_cls, data):
-        data.X = [data.X, data.X]
+        X, y = data
+        X = [X, X]
         m = self.num_samples // 5
         n = self.num_samples - m
 
-        dataset_train, dataset_valid = cv_split_cls(5)(data)
-        X_train, y_train = data_from_dataset(dataset_train)
-        X_valid, y_valid = data_from_dataset(dataset_valid)
-
+        X_train, X_valid, y_train, y_valid = cv_split_cls(5)(X, y)
         assert len(X_train[0]) == len(X_train[1]) == len(y_train) == n
         assert len(X_valid[0]) == len(X_valid[1]) == len(y_valid) == m
 
     def test_with_dict(self, cv_split_cls, data):
-        data.X = {'1': data.X, '2': data.X}
-        dataset_train, dataset_valid = cv_split_cls(5)(data)
+        X, y = data
+        X = {'1': X, '2': X}
+        X_train, X_valid, y_train, y_valid = cv_split_cls(5)(X, y)
 
         m = self.num_samples // 5
         n = self.num_samples - m
-
-        X_train, y_train = data_from_dataset(dataset_train)
-        X_valid, y_valid = data_from_dataset(dataset_valid)
 
         assert len(X_train['1']) == len(X_train['2']) == len(y_train) == n
         assert len(X_valid['1']) == len(X_valid['2']) == len(y_valid) == m
@@ -705,53 +671,49 @@ class TestCVSplit:
     def test_with_pandas(self, cv_split_cls, data):
         import pandas as pd
 
-        data.X = pd.DataFrame(
-            data.X,
-            columns=[str(i) for i in range(data.X.shape[1])],
-        )
-        dataset_train, dataset_valid = cv_split_cls(5)(data)
+        X, y = data
+        df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        y = pd.Series(y)
+
+        X_train, X_valid, y_train, y_valid = cv_split_cls(5)(df, y)
 
         m = self.num_samples // 5
-        X_train, y_train = data_from_dataset(dataset_train)
-        X_valid, y_valid = data_from_dataset(dataset_valid)
 
         assert len(X_train) + len(X_valid) == self.num_samples
         assert len(y_train) + len(y_valid) == self.num_samples
         assert len(X_valid) == len(y_valid) == m
 
     def test_y_str_val_stratified(self, cv_split_cls, data):
-        y = np.array(['a', 'a', 'a', 'b'] * (self.num_samples // 4))
-        if len(data.X) != len(y):
+        X = data[0]
+        y = np.array(['a', 'a', 'a', 'b'] * (len(X) // 4))
+        if len(X) != len(y):
             raise ValueError
-        data.y = y
 
-        dataset_train, dataset_valid = cv_split_cls(
-            5, stratified=True)(data, y)
-        y_train = data_from_dataset(dataset_train)[1]
-        y_valid = data_from_dataset(dataset_valid)[1]
+        _, _, y_train, y_valid = cv_split_cls(5, stratified=True)(X, y)
 
         assert np.isclose(np.mean(y_train == 'b'), 0.25)
         assert np.isclose(np.mean(y_valid == 'b'), 0.25)
 
     def test_y_list_of_arr_does_not_raise(self, cv_split_cls, data):
-        y = [np.zeros(self.num_samples), np.ones(self.num_samples)]
-        data.y = y
-        cv_split_cls(5, stratified=False)(data)
+        X = data[0]
+        y = [np.zeros(len(X)), np.ones(len(X))]
+
+        cv_split_cls(5, stratified=False)(X, y)
 
     def test_y_list_of_arr_stratified(self, cv_split_cls, data):
-        y = [np.zeros(self.num_samples), np.ones(self.num_samples)]
-        data.y = y
+        X = data[0]
+        y = [np.zeros(len(X)), np.ones(len(X))]
         with pytest.raises(ValueError) as exc:
-            cv_split_cls(5, stratified=True)(data, y)
+            cv_split_cls(5, stratified=True)(X, y)
 
-        expected = "Stratified CV requires explicitely passing a suitable y."
+        expected = "Stratified CV not possible with given y."
         assert exc.value.args[0] == expected
 
     def test_y_dict_does_not_raise(self, cv_split_cls, data):
-        y = {'a': np.zeros(self.num_samples), 'b': np.ones(self.num_samples)}
-        data.y = y
+        X = data[0]
+        y = {'a': np.zeros(len(X)), 'b': np.ones(len(X))}
 
-        cv_split_cls(5, stratified=False)(data)
+        cv_split_cls(5, stratified=False)(X, y)
 
     def test_y_dict_stratified_raises(self, cv_split_cls, data):
         X = data[0]
@@ -761,47 +723,65 @@ class TestCVSplit:
             # an sklearn error is raised
             cv_split_cls(5, stratified=True)(X, y)
 
-    @pytest.mark.parametrize('cv', [5, 0.2])
-    @pytest.mark.parametrize('X', [np.zeros((100, 10)), torch.zeros((100, 10))])
-    def test_y_none_stratified(self, cv_split_cls, data, cv, X):
-        data.X = X
-        with pytest.raises(ValueError) as exc:
-            cv_split_cls(cv, stratified=True)(data, None)
+    def test_y_none_cv_int(self, cv_split_cls, data):
+        cv = 5
+        X, y = data[0], None
 
-        expected = "Stratified CV requires explicitely passing a suitable y."
+        with pytest.raises(ValueError) as exc:
+            cv_split_cls(cv, stratified=True)(X, y)
+
+        expected = "Stratified CV not possible with given y."
         assert exc.value.args[0] == expected
 
-    def test_shuffle_split_reproducible_with_random_state(
-            self, cv_split_cls, dataset_cls):
-        n = self.num_samples
-        X, y = np.random.random((n, 10)), np.random.randint(0, 10, size=n)
+    def test_y_none_cv_float_regular_X(self, cv_split_cls, data):
+        cv = 0.2
+        X, y = data[0], None
+
+        with pytest.raises(ValueError) as exc:
+            cv_split_cls(cv, stratified=True)(X, y)
+
+        expected = "Stratified CV not possible with given y."
+        assert exc.value.args[0] == expected
+
+    def test_y_none_cv_float_irregular_X(self, cv_split_cls):
+        cv = 0.2
+        X, y = torch.zeros((100, 10)), None
+
+        with pytest.raises(ValueError) as exc:
+            cv_split_cls(cv, stratified=True)(X, y)
+
+        expected = "Stratified CV not possible with given y."
+        assert exc.value.args[0] == expected
+
+    def test_shuffle_split_reproducible_with_random_state(self, cv_split_cls):
+        X, y = np.random.random((100, 10)), np.random.randint(0, 10, size=100)
         cv = cv_split_cls(0.2, stratified=False)
-
-        dst0, dsv0 = cv(dataset_cls(X, y))
-        dst1, dsv1 = cv(dataset_cls(X, y))
-
-        Xt0, yt0 = data_from_dataset(dst0)
-        Xv0, yv0 = data_from_dataset(dsv0)
-        Xt1, yt1 = data_from_dataset(dst1)
-        Xv1, yv1 = data_from_dataset(dsv1)
+        Xt0, Xv0, yt0, yv0 = cv(X, y)
+        Xt1, Xv1, yt1, yv1 = cv(X, y)
 
         assert not np.allclose(Xt0, Xt1)
         assert not np.allclose(Xv0, Xv1)
         assert not np.allclose(yt0, yt1)
         assert not np.allclose(yv0, yv1)
 
+        cv = cv_split_cls(0.2, stratified=False, random_state=0)
+        Xt0, Xv0, yt0, yv0 = cv(X, y)
+        Xt1, Xv1, yt1, yv1 = cv(X, y)
+
+        assert np.allclose(Xt0, Xt1)
+        assert np.allclose(Xv0, Xv1)
+        assert np.allclose(yt0, yt1)
+        assert np.allclose(yv0, yv1)
+
     def test_group_kfold(self, cv_split_cls, data):
         from sklearn.model_selection import GroupKFold
 
-        X, y = data.X, data.y
-        n = self.num_samples // 2
+        X, y = data
+        n = len(X) // 2
         groups = np.asarray(
-            [0 for _ in range(n)] + [1 for _ in range(self.num_samples - n)])
-
-        dataset_train, dataset_valid = cv_split_cls(
-            GroupKFold(n_splits=2))(data, groups=groups)
-        X_train, y_train = data_from_dataset(dataset_train)
-        X_valid, y_valid = data_from_dataset(dataset_valid)
+            [0 for _ in range(n)] + [1 for _ in range(len(X) - n)])
+        X_train, X_valid, y_train, y_valid = cv_split_cls(
+            GroupKFold(n_splits=2))(X, y, groups)
 
         assert np.allclose(X[:n], X_train)
         assert np.allclose(y[:n], y_train)

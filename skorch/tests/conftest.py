@@ -100,11 +100,8 @@ def score55():
 
 @pytest.fixture
 def train_split():
-    # pylint: disable=unused-argument
-    def func(dataset, y):
-        ds_train = type(dataset)(dataset.X[:2], dataset.y[:2])
-        ds_valid = type(dataset)(dataset.X[2:], dataset.y[2:])
-        return ds_train, ds_valid
+    def func(X, y):
+        return X[:2], X[2:], y[:2], y[2:]
     return func
 
 
