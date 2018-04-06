@@ -264,11 +264,6 @@ class TestMultiIndexing:
         ),
         (
             torch.arange(0, 12).view(4, 3),
-            np.int64(2),
-            np.array([6, 7, 8]),
-        ),
-        (
-            torch.arange(0, 12).view(4, 3),
             np.s_[-2:],
             np.array([[6, 7, 8], [9, 10, 11]]),
         ),
